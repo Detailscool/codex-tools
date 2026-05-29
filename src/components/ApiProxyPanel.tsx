@@ -8,6 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type CSSProperties,
 } from "react";
+import { createPortal } from "react-dom";
 
 import { useI18n } from "../i18n/I18nProvider";
 import type { MessageCatalog } from "../i18n/catalog";
@@ -61,6 +62,8 @@ type ApiProxyPanelProps = {
   savedPort: number;
   loadBalanceMode: ApiProxyLoadBalanceMode;
   sequentialFiveHourLimitPercent: number;
+  apiProxySupportedModels: string[];
+  apiProxyDisabledModels: string[];
   remoteServers: RemoteServerConfig[];
   remoteStatuses: Record<string, RemoteProxyStatus>;
   remoteLogs: Record<string, string>;
@@ -89,6 +92,7 @@ type ApiProxyPanelProps = {
   onPersistPort: (port: number) => Promise<void> | void;
   onUpdateLoadBalanceMode: (mode: ApiProxyLoadBalanceMode) => Promise<void> | void;
   onUpdateSequentialFiveHourLimitPercent: (percent: number) => Promise<void> | void;
+  onUpdateApiProxyDisabledModels: (models: string[]) => Promise<void> | void;
   onUpdateRemoteServers: (servers: RemoteServerConfig[]) => void;
   onRefreshRemoteStatus: (server: RemoteServerConfig) => void;
   onDeployRemote: (server: RemoteServerConfig) => void;
@@ -364,6 +368,7 @@ type ApiProxyUsageSeriesView = {
   totalCalls: number;
   totalTokens: number;
   totalValue: number;
+  bucketPoints: ApiProxyUsagePlotPoint[];
   points: ApiProxyUsagePlotPoint[];
   curveSegments: ApiProxyUsageCurveSegment[];
   linePath: string;
@@ -375,7 +380,10 @@ type ApiProxyUsageHoverState = {
   cursorY: number;
   tooltipX: number;
   tooltipY: number;
-  timestamp: number;
+  bucketStartTimestamp: number;
+  bucketEndTimestamp: number;
+  bucketStartX: number;
+  bucketEndX: number;
   timeLabel: string;
   metricLabel: string;
   entries: Array<{
@@ -447,6 +455,11 @@ function hashUsageModel(model: string) {
   return hash;
 }
 
+function normalizeDisabledProxyModels(disabledModels: string[], supportedModels: string[]) {
+  const disabledSet = new Set(disabledModels);
+  return supportedModels.filter((model) => disabledSet.has(model));
+}
+
 function pickUsageColor(index: number) {
   return API_PROXY_USAGE_PALETTE[index % API_PROXY_USAGE_PALETTE.length];
 }
@@ -487,24 +500,43 @@ function formatUsageAxisValue(value: number | undefined | null) {
   return String(Math.round(normalized));
 }
 
-function formatUsageTooltipTime(locale: string, timestampSec: number, range: ApiProxyUsageRange) {
-  const date = new Date(timestampSec * 1000);
+function usageTooltipDateTimeOptions(range: ApiProxyUsageRange): Intl.DateTimeFormatOptions {
+  const options: Intl.DateTimeFormatOptions = {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  };
+
+  if (range === "1h") {
+    options.second = "2-digit";
+  }
+
+  if (range === "14d" || range === "30d") {
+    delete options.hour;
+    delete options.minute;
+    delete options.second;
+  }
+
+  return options;
+}
+
+function formatUsageTooltipTime(
+  locale: string,
+  bucketStartSec: number,
+  bucketEndSec: number,
+  range: ApiProxyUsageRange,
+) {
+  const startDate = new Date(bucketStartSec * 1000);
+  const endDate = new Date(bucketEndSec * 1000);
 
   try {
-    const options: Intl.DateTimeFormatOptions = {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    };
-
-    if (range === "1h") {
-      options.second = "2-digit";
-    }
-
-    return new Intl.DateTimeFormat(locale, options).format(date);
+    const formatter = new Intl.DateTimeFormat(locale, usageTooltipDateTimeOptions(range));
+    const startLabel = formatter.format(startDate);
+    const endLabel = formatter.format(endDate);
+    return startLabel === endLabel ? startLabel : `${startLabel} - ${endLabel}`;
   } catch {
-    return date.toLocaleString(locale);
+    return `${startDate.toLocaleString(locale)} - ${endDate.toLocaleString(locale)}`;
   }
 }
 
@@ -576,6 +608,54 @@ function interpolateSeriesAtX(
   return null;
 }
 
+function resolveUsageBucketWindow(
+  pointerTimestamp: number,
+  chartStartTimestamp: number,
+  chartEndTimestamp: number,
+  bucketSeconds: number,
+  series: ApiProxyUsageSeriesView,
+) {
+  if (series.bucketPoints.length === 0) {
+    return null;
+  }
+
+  if (series.bucketPoints.length === 1) {
+    const point = series.bucketPoints[0];
+    return {
+      point,
+      bucketStartTimestamp: Math.max(chartStartTimestamp, point.timestamp),
+      bucketEndTimestamp: chartEndTimestamp,
+    };
+  }
+
+  for (let index = 0; index < series.bucketPoints.length; index += 1) {
+    const point = series.bucketPoints[index];
+    const nextPoint = series.bucketPoints[index + 1];
+    const rawBucketStart = point.timestamp;
+    const rawBucketEnd = nextPoint?.timestamp ?? point.timestamp + bucketSeconds;
+    const bucketStartTimestamp = Math.max(chartStartTimestamp, rawBucketStart);
+    const bucketEndTimestamp = Math.min(chartEndTimestamp, rawBucketEnd);
+
+    if (
+      pointerTimestamp >= bucketStartTimestamp &&
+      (pointerTimestamp < bucketEndTimestamp || index === series.bucketPoints.length - 1)
+    ) {
+      return {
+        point,
+        bucketStartTimestamp,
+        bucketEndTimestamp,
+      };
+    }
+  }
+
+  const lastPoint = series.bucketPoints[series.bucketPoints.length - 1];
+  return {
+    point: lastPoint,
+    bucketStartTimestamp: Math.max(chartStartTimestamp, lastPoint.timestamp),
+    bucketEndTimestamp: chartEndTimestamp,
+  };
+}
+
 function clampTooltipPosition(
   anchorX: number,
   anchorY: number,
@@ -631,7 +711,9 @@ function resolveUsageHoverState({
   locale,
   range,
   startTimestamp,
+  endTimestamp,
   rangeSeconds,
+  bucketSeconds,
   metric,
   metricLabel,
 }: {
@@ -646,7 +728,9 @@ function resolveUsageHoverState({
   locale: string;
   range: ApiProxyUsageRange;
   startTimestamp: number;
+  endTimestamp: number;
   rangeSeconds: number;
+  bucketSeconds: number;
   metric: ApiProxyUsageMetric;
   metricLabel: string;
 }): ApiProxyUsageHoverState | null {
@@ -672,23 +756,53 @@ function resolveUsageHoverState({
     return null;
   }
 
-  const entries = series
-    .map((item) => {
-      const interpolated = interpolateSeriesAtX(relativeX, item);
-      if (!interpolated) {
-        return null;
-      }
+  const pointerTimestamp =
+    startTimestamp + ((relativeX - plotLeft) / Math.max(plotRight - plotLeft, 1)) * rangeSeconds;
+  const primaryBucket = resolveUsageBucketWindow(
+    pointerTimestamp,
+    startTimestamp,
+    endTimestamp,
+    bucketSeconds,
+    series[0],
+  );
+  if (!primaryBucket) {
+    return null;
+  }
 
-      return {
-        model: item.model,
-        color: item.color,
-        value: interpolated.value,
-        valueLabel: formatUsageMetricValue(interpolated.value, locale, metric),
-        pointX: interpolated.x,
-        pointY: interpolated.y,
-        timestamp: interpolated.timestamp,
-      };
-    })
+  const bucketStartX =
+    plotLeft +
+    ((primaryBucket.bucketStartTimestamp - startTimestamp) / Math.max(rangeSeconds, 1)) * (plotRight - plotLeft);
+  const bucketEndX =
+    plotLeft +
+    ((primaryBucket.bucketEndTimestamp - startTimestamp) / Math.max(rangeSeconds, 1)) * (plotRight - plotLeft);
+  const bucketCursorX = primaryBucket.point.x;
+
+    const entries = series
+      .map((item) => {
+        const bucket = resolveUsageBucketWindow(
+          pointerTimestamp,
+          startTimestamp,
+        endTimestamp,
+        bucketSeconds,
+        item,
+      );
+        if (!bucket) {
+          return null;
+        }
+        const interpolated = interpolateSeriesAtX(bucket.point.x, item);
+        if (!interpolated) {
+          return null;
+        }
+
+        return {
+          model: item.model,
+          color: item.color,
+          value: bucket.point.value,
+          valueLabel: formatUsageMetricValue(bucket.point.value, locale, metric),
+          pointX: interpolated.x,
+          pointY: interpolated.y,
+        };
+      })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
     .sort((left, right) => right.value - left.value || left.model.localeCompare(right.model));
 
@@ -696,7 +810,6 @@ function resolveUsageHoverState({
     return null;
   }
 
-  const timestamp = startTimestamp + ((relativeX - plotLeft) / Math.max(plotRight - plotLeft, 1)) * rangeSeconds;
   const anchorX = clientX - frameRect.left;
   const anchorY = clientY - frameRect.top;
   const tooltipSize = getUsageTooltipSize(entries.length);
@@ -709,12 +822,20 @@ function resolveUsageHoverState({
   );
 
   return {
-    cursorX: relativeX,
+    cursorX: bucketCursorX,
     cursorY: relativeY,
     tooltipX: tooltipPosition.x,
     tooltipY: tooltipPosition.y,
-    timestamp,
-    timeLabel: formatUsageTooltipTime(locale, Math.round(timestamp), range),
+    bucketStartTimestamp: primaryBucket.bucketStartTimestamp,
+    bucketEndTimestamp: primaryBucket.bucketEndTimestamp,
+    bucketStartX,
+    bucketEndX,
+    timeLabel: formatUsageTooltipTime(
+      locale,
+      Math.round(primaryBucket.bucketStartTimestamp),
+      Math.round(primaryBucket.bucketEndTimestamp),
+      range,
+    ),
     metricLabel,
     entries,
   };
@@ -922,6 +1043,7 @@ function ApiProxyUsageChart({
 
     const startTimestamp = endTimestamp - selectedRangeSeconds;
     const baselineY = margins.top + plotHeight;
+    const bucketSeconds = Math.max(1, stats?.bucketSeconds ?? selectedRangeSeconds);
 
     const prepared = ordered.map((item, index) => {
       const color = pickUsageColor(index);
@@ -963,20 +1085,19 @@ function ApiProxyUsageChart({
 
     const yDomain = maxValue * 1.12;
     const series = prepared.map((item) => {
-      const pointValues = [...item.metricPoints];
-      const latestPoint = pointValues[pointValues.length - 1];
-      if (latestPoint && latestPoint.timestamp < endTimestamp) {
-        pointValues.push({
-          timestamp: endTimestamp,
-          value: latestPoint.value,
-        });
-      }
-
-      const points = pointValues.map((point) => {
-        const clampedTimestamp = clampUsageValue(point.timestamp, startTimestamp, endTimestamp);
+      const bucketPoints = item.metricPoints.map((point, index) => {
+        const nextPoint = item.metricPoints[index + 1];
+        const bucketStartTimestamp = clampUsageValue(point.timestamp, startTimestamp, endTimestamp);
+        const bucketEndTimestamp = clampUsageValue(
+          nextPoint?.timestamp ?? endTimestamp,
+          startTimestamp,
+          endTimestamp,
+        );
+        const bucketMidTimestamp =
+          bucketStartTimestamp + (bucketEndTimestamp - bucketStartTimestamp) / 2;
         const x =
           margins.left +
-          ((clampedTimestamp - startTimestamp) / Math.max(selectedRangeSeconds, 1)) * plotWidth;
+          ((bucketMidTimestamp - startTimestamp) / Math.max(selectedRangeSeconds, 1)) * plotWidth;
         const y = baselineY - (Math.max(0, point.value) / yDomain) * plotHeight;
         return {
           timestamp: point.timestamp,
@@ -985,6 +1106,29 @@ function ApiProxyUsageChart({
           y: clampUsageValue(y, margins.top, baselineY),
         };
       });
+
+      const firstBucket = bucketPoints[0];
+      const lastBucket = bucketPoints[bucketPoints.length - 1];
+      const pointValues =
+        firstBucket && lastBucket
+          ? [
+              {
+                timestamp: startTimestamp,
+                value: firstBucket.value,
+                x: margins.left,
+                y: firstBucket.y,
+              },
+              ...bucketPoints,
+              {
+                timestamp: endTimestamp,
+                value: lastBucket.value,
+                x: margins.left + plotWidth,
+                y: lastBucket.y,
+              },
+            ]
+          : [];
+
+      const points = pointValues;
 
       const curveSegments = buildMonotoneCurveSegments(points);
       const linePath = buildSmoothPath(points, curveSegments);
@@ -997,6 +1141,7 @@ function ApiProxyUsageChart({
         totalCalls: item.totalCalls,
         totalTokens: item.totalTokens,
         totalValue: item.totalValue,
+        bucketPoints,
         points,
         curveSegments,
         linePath,
@@ -1006,12 +1151,14 @@ function ApiProxyUsageChart({
 
     return {
       series,
+      bucketSeconds,
       maxValue,
       endTimestamp,
     };
   }, [metric, margins.left, margins.top, plotHeight, plotWidth, selectedRangeSeconds, stats]);
 
   const series = chartData.series;
+  const bucketSeconds = chartData.bucketSeconds ?? Math.max(1, selectedRangeSeconds);
   const hasUsageData = chartData.maxValue > 0 && series.length > 0;
   const endTimestamp = chartData.endTimestamp;
   const startTimestamp = endTimestamp - selectedRangeSeconds;
@@ -1115,14 +1262,16 @@ function ApiProxyUsageChart({
         locale,
         range,
         startTimestamp,
+        endTimestamp,
         rangeSeconds: selectedRangeSeconds,
+        bucketSeconds,
         metric,
         metricLabel,
       });
 
       setHoverState(next);
     },
-    [chartHeight, chartWidth, hasUsageData, locale, margins, metric, metricLabel, range, selectedRangeSeconds, series, startTimestamp],
+    [bucketSeconds, chartHeight, chartWidth, endTimestamp, hasUsageData, locale, margins, metric, metricLabel, range, selectedRangeSeconds, series, startTimestamp],
   );
 
   const handlePointerMove = useCallback(
@@ -1324,6 +1473,13 @@ function ApiProxyUsageChart({
                 </g>
                 {hoverState ? (
                   <g className="proxyUsageHoverLayer" pointerEvents="none">
+                    <rect
+                      className="proxyUsageHoverBand"
+                      x={hoverState.bucketStartX}
+                      y={margins.top}
+                      width={Math.max(1, hoverState.bucketEndX - hoverState.bucketStartX)}
+                      height={plotHeight}
+                    />
                     <line
                       className="proxyUsageHoverCrosshair"
                       x1={hoverState.cursorX}
@@ -1449,6 +1605,8 @@ export function ApiProxyPanel({
   savedPort,
   loadBalanceMode,
   sequentialFiveHourLimitPercent,
+  apiProxySupportedModels,
+  apiProxyDisabledModels,
   remoteServers,
   remoteStatuses,
   remoteLogs,
@@ -1477,6 +1635,7 @@ export function ApiProxyPanel({
   onPersistPort,
   onUpdateLoadBalanceMode,
   onUpdateSequentialFiveHourLimitPercent,
+  onUpdateApiProxyDisabledModels,
   onUpdateRemoteServers,
   onRefreshRemoteStatus,
   onDeployRemote,
@@ -1506,6 +1665,12 @@ export function ApiProxyPanel({
   const cloudflaredBusy = installingCloudflared || startingCloudflared || stoppingCloudflared;
   const [portDraft, setPortDraft] = useState<string | null>(null);
   const [sequentialLimitDraft, setSequentialLimitDraft] = useState<number | null>(null);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelMenuSaving, setModelMenuSaving] = useState(false);
+  const [modelMenuDraft, setModelMenuDraft] = useState<string[]>(() =>
+    normalizeDisabledProxyModels(apiProxyDisabledModels, apiProxySupportedModels),
+  );
+  const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [publicAccessEnabled, setPublicAccessEnabled] = useState(cloudflaredStatus.running);
   const [tunnelMode, setTunnelMode] = useState<CloudflaredTunnelMode>(
     cloudflaredStatus.tunnelMode ?? "quick",
@@ -1540,6 +1705,81 @@ export function ApiProxyPanel({
     ],
     [proxyCopy.loadBalanceAverage, proxyCopy.loadBalanceSequential],
   );
+  const portInput = portDraft ?? String(status.port ?? savedPort ?? DEFAULT_PROXY_PORT);
+  const effectiveSequentialLimit = sequentialLimitDraft ?? sequentialFiveHourLimitPercent;
+  const effectiveDisabledModels = useMemo(
+    () => normalizeDisabledProxyModels(apiProxyDisabledModels, apiProxySupportedModels),
+    [apiProxyDisabledModels, apiProxySupportedModels],
+  );
+  const effectiveModelMenuDraft = useMemo(
+    () => normalizeDisabledProxyModels(modelMenuDraft, apiProxySupportedModels),
+    [apiProxySupportedModels, modelMenuDraft],
+  );
+  const enabledModelCount = apiProxySupportedModels.length - effectiveDisabledModels.length;
+  const hasModelMenuChanges =
+    effectiveDisabledModels.length !== effectiveModelMenuDraft.length ||
+    effectiveDisabledModels.some((model, index) => model !== effectiveModelMenuDraft[index]);
+  const normalizedModelSearchQuery = modelSearchQuery.trim().toLocaleLowerCase();
+  const filteredProxyModels = useMemo(
+    () =>
+      apiProxySupportedModels.filter((model) =>
+        normalizedModelSearchQuery === ""
+          ? true
+          : model.toLocaleLowerCase().includes(normalizedModelSearchQuery),
+      ),
+    [apiProxySupportedModels, normalizedModelSearchQuery],
+  );
+
+  useEffect(() => {
+    if (modelMenuOpen) {
+      return;
+    }
+    setModelMenuDraft(effectiveDisabledModels);
+  }, [effectiveDisabledModels, modelMenuOpen]);
+
+  useEffect(() => {
+    if (!modelMenuOpen) {
+      setModelSearchQuery("");
+      return;
+    }
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !modelMenuSaving) {
+        setModelMenuOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [modelMenuOpen, modelMenuSaving]);
+
+  const handleToggleProxyModel = useCallback((model: string, enabled: boolean) => {
+    setModelMenuDraft((current) => {
+      const currentDisabled = normalizeDisabledProxyModels(current, apiProxySupportedModels);
+      if (enabled) {
+        return currentDisabled.filter((item) => item !== model);
+      }
+      if (currentDisabled.includes(model)) {
+        return currentDisabled;
+      }
+      return normalizeDisabledProxyModels([...currentDisabled, model], apiProxySupportedModels);
+    });
+  }, [apiProxySupportedModels]);
+
+  const handleSaveProxyModels = useCallback(async () => {
+    if (modelMenuSaving) {
+      return;
+    }
+    setModelMenuSaving(true);
+    try {
+      await onUpdateApiProxyDisabledModels(effectiveModelMenuDraft);
+      setModelMenuOpen(false);
+    } finally {
+      setModelMenuSaving(false);
+    }
+  }, [effectiveModelMenuDraft, modelMenuSaving, onUpdateApiProxyDisabledModels]);
 
   const effectiveRemoteDrafts =
     remoteDrafts.length === 0 && remoteServers.length > 0
@@ -1570,8 +1810,6 @@ export function ApiProxyPanel({
     writeStorageValue(REMOTE_HISTORY_CACHE_KEY, JSON.stringify(remoteHistory), "local");
   }, [remoteHistory]);
 
-  const portInput = portDraft ?? String(status.port ?? savedPort ?? DEFAULT_PROXY_PORT);
-  const effectiveSequentialLimit = sequentialLimitDraft ?? sequentialFiveHourLimitPercent;
   const rawPort = portInput.trim();
   const effectivePort = !rawPort
     ? 8787
@@ -1943,6 +2181,41 @@ export function ApiProxyPanel({
             </div>
           </div>
 
+          <article className="proxyDetailCard proxyEndpointCard">
+            <span className="proxyLabel">{proxyCopy.baseUrlLabel}</span>
+            <div className="proxyEndpointList">
+              <div className="proxyEndpointRow">
+                <div className="proxyEndpointMeta">
+                  <span>{proxyCopy.localBaseUrlLabel}</span>
+                  <code>{status.baseUrl ?? proxyCopy.baseUrlPlaceholder}</code>
+                </div>
+                <button
+                  className="ghost proxyCopyButton"
+                  onClick={() => copyText(status.baseUrl)}
+                  disabled={!status.baseUrl}
+                >
+                  {proxyCopy.copy}
+                </button>
+              </div>
+
+              {status.lanBaseUrl ? (
+                <div className="proxyEndpointRow">
+                  <div className="proxyEndpointMeta">
+                    <span>{proxyCopy.lanBaseUrlLabel}</span>
+                    <code>{status.lanBaseUrl}</code>
+                  </div>
+                  <button
+                    className="ghost proxyCopyButton"
+                    onClick={() => copyText(status.lanBaseUrl)}
+                    disabled={!status.lanBaseUrl}
+                  >
+                    {proxyCopy.copy}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </article>
+
           <article className="proxyDetailCard proxyBalanceCard">
             <div className="proxyBalanceHeader">
               <span className="proxyLabel">{proxyCopy.loadBalanceLabel}</span>
@@ -1988,44 +2261,28 @@ export function ApiProxyPanel({
                 <p>{proxyCopy.sequentialFiveHourLimitDescription}</p>
               </div>
             ) : null}
+
+          </article>
+
+          <article className="proxyDetailCard proxyModelCard">
+            <div className="proxyModelCardHeader">
+              <div className="proxyModelCardCopy">
+                <span className="proxyLabel">{proxyCopy.modelMenuLabel}</span>
+                <strong>{enabledModelCount}/{apiProxySupportedModels.length || 0}</strong>
+                <p>{proxyCopy.modelMenuDescription}</p>
+              </div>
+              <button
+                type="button"
+                className="ghost proxySubmenuTrigger"
+                disabled={savingSettings || apiProxySupportedModels.length === 0}
+                onClick={() => setModelMenuOpen(true)}
+              >
+                <span>{proxyCopy.modelMenuOpen}</span>
+              </button>
+            </div>
           </article>
 
           <div className="proxyDetailGrid">
-            <article className="proxyDetailCard proxyEndpointCard">
-              <span className="proxyLabel">{proxyCopy.baseUrlLabel}</span>
-              <div className="proxyEndpointList">
-                <div className="proxyEndpointRow">
-                  <div className="proxyEndpointMeta">
-                    <span>{proxyCopy.localBaseUrlLabel}</span>
-                    <code>{status.baseUrl ?? proxyCopy.baseUrlPlaceholder}</code>
-                  </div>
-                  <button
-                    className="ghost proxyCopyButton"
-                    onClick={() => copyText(status.baseUrl)}
-                    disabled={!status.baseUrl}
-                  >
-                    {proxyCopy.copy}
-                  </button>
-                </div>
-
-                {status.lanBaseUrl ? (
-                  <div className="proxyEndpointRow">
-                    <div className="proxyEndpointMeta">
-                      <span>{proxyCopy.lanBaseUrlLabel}</span>
-                      <code>{status.lanBaseUrl}</code>
-                    </div>
-                    <button
-                      className="ghost proxyCopyButton"
-                      onClick={() => copyText(status.lanBaseUrl)}
-                      disabled={!status.lanBaseUrl}
-                    >
-                      {proxyCopy.copy}
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            </article>
-
             <article className="proxyDetailCard">
               <div className="proxyDetailHeader">
                 <span className="proxyLabel">{proxyCopy.apiKeyLabel}</span>
@@ -2060,6 +2317,122 @@ export function ApiProxyPanel({
               <p className="proxyErrorText">{status.lastError ?? proxyCopy.none}</p>
             </article>
           </div>
+
+          {modelMenuOpen
+            ? createPortal(
+                <div
+                  className="settingsOverlay"
+                  onClick={() => {
+                    if (!modelMenuSaving) {
+                      setModelMenuOpen(false);
+                    }
+                  }}
+                >
+                  <section
+                    className="settingsDialog proxyModelDialog"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label={proxyCopy.modelMenuTitle}
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <div className="settingsHeader">
+                      <div>
+                        <h2>{proxyCopy.modelMenuTitle}</h2>
+                        <p className="proxyModelDialogSubtitle">{proxyCopy.modelMenuDialogDescription}</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="iconButton ghost"
+                        onClick={() => setModelMenuOpen(false)}
+                        title={copy.common.close}
+                        disabled={modelMenuSaving}
+                        aria-label={copy.common.close}
+                      >
+                        <svg className="iconGlyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="m6 6 12 12" />
+                          <path d="M18 6 6 18" />
+                        </svg>
+                      </button>
+                    </div>
+
+                    <div className="proxyModelDialogToolbar">
+                      <label className="proxyModelSearchField">
+                        <span className="visuallyHidden">{proxyCopy.modelMenuSearchLabel}</span>
+                        <input
+                          className="proxyModelSearchInput"
+                          type="search"
+                          value={modelSearchQuery}
+                          onChange={(event) => setModelSearchQuery(event.currentTarget.value)}
+                          placeholder={proxyCopy.modelMenuSearchPlaceholder}
+                          spellCheck={false}
+                          autoFocus
+                        />
+                      </label>
+
+                      <div className="proxyModelDialogToolbarActions">
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => setModelMenuDraft([])}
+                          disabled={modelMenuSaving || apiProxySupportedModels.length === 0}
+                        >
+                          {proxyCopy.modelMenuEnableAll}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => setModelMenuDraft(apiProxySupportedModels)}
+                          disabled={modelMenuSaving || apiProxySupportedModels.length === 0}
+                        >
+                          {proxyCopy.modelMenuDisableAll}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => setModelMenuOpen(false)}
+                          disabled={modelMenuSaving}
+                        >
+                          {proxyCopy.modelMenuCancel}
+                        </button>
+                        <button
+                          type="button"
+                          className="primary"
+                          onClick={() => void handleSaveProxyModels()}
+                          disabled={modelMenuSaving || !hasModelMenuChanges}
+                        >
+                          {proxyCopy.modelMenuSave}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="proxyModelDialogList">
+                      {filteredProxyModels.length === 0 ? (
+                        <div className="proxyModelEmptyState">{proxyCopy.modelMenuSearchEmpty}</div>
+                      ) : filteredProxyModels.map((model) => {
+                        const enabled = !effectiveModelMenuDraft.includes(model);
+                        return (
+                          <label key={model} className="proxyModelToggleRow">
+                            <strong className="proxyModelToggleName">{model}</strong>
+                            <span className="themeSwitch proxyModelToggleControl">
+                              <input
+                                type="checkbox"
+                                checked={enabled}
+                                disabled={modelMenuSaving}
+                                onChange={(event) => handleToggleProxyModel(model, event.target.checked)}
+                              />
+                              <span className="themeSwitchTrack" aria-hidden="true">
+                                <span className="themeSwitchThumb" />
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </section>
+                </div>,
+                document.body,
+              )
+            : null}
         </section>
 
         <section className="proxySectionCard">
