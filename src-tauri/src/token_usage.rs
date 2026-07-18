@@ -103,6 +103,7 @@ pub(crate) struct CodexCostAnalyticsSnapshot {
     pub(crate) cost_source_updated_at: Option<i64>,
     #[serde(default)]
     pub(crate) cost_source_error: Option<String>,
+    pub(crate) daily: Vec<CodexDailyCostBucket>,
     pub(crate) weekly_budget_usd: Option<f64>,
     pub(crate) weekly_budget_percent: Option<f64>,
     pub(crate) weekly_budget_alert: String,
@@ -110,6 +111,15 @@ pub(crate) struct CodexCostAnalyticsSnapshot {
     pub(crate) sessions: Vec<CodexSessionCostBreakdown>,
     pub(crate) heatmap: Vec<CodexHourlyCostBucket>,
     pub(crate) top_prompts: Vec<CodexPromptCostBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodexDailyCostBucket {
+    pub(crate) date: String,
+    pub(crate) event_count: usize,
+    pub(crate) total: CodexTokenTotals,
+    pub(crate) cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -859,6 +869,7 @@ where
     let mut last_7d = CodexTokenTotals::default();
     let mut last_7d_cost_usd = 0.0;
     let mut budget_period_cost_usd = 0.0;
+    let mut daily = BTreeMap::<String, CodexDailyCostBucket>::new();
 
     for parsed in parsed_files {
         let ParsedAnalyticsSessionFile {
@@ -883,6 +894,17 @@ where
 
         for event in events {
             event_count += 1;
+            if let Some(date) = local_date_at(event.timestamp).map(|date| date.to_string()) {
+                let bucket = daily.entry(date.clone()).or_insert_with(|| CodexDailyCostBucket {
+                    date,
+                    event_count: 0,
+                    total: CodexTokenTotals::default(),
+                    cost_usd: 0.0,
+                });
+                bucket.event_count += 1;
+                bucket.total.add(&event.total);
+                bucket.cost_usd += event.cost_usd;
+            }
             if last_7d_date_range
                 .and_then(|(start, end)| {
                     local_date_at(event.timestamp).map(|date| date >= start && date <= end)
@@ -964,6 +986,13 @@ where
         cost_source: COST_SOURCE_LOCAL.to_string(),
         cost_source_updated_at: Some(now),
         cost_source_error: None,
+        daily: daily
+            .into_values()
+            .map(|mut bucket| {
+                bucket.cost_usd = round_cost(bucket.cost_usd);
+                bucket
+            })
+            .collect(),
         weekly_budget_usd: None,
         weekly_budget_percent: None,
         weekly_budget_alert: "none".to_string(),
@@ -2474,6 +2503,12 @@ fn heatmap_bucket_key_with_offset(
     )
 }
 
+fn analytics_date_key(timestamp: i64) -> Option<String> {
+    OffsetDateTime::from_unix_timestamp(timestamp)
+        .ok()
+        .map(|date_time| date_time.date().to_string())
+}
+
 fn cost_analytics_csv(snapshot: &CodexCostAnalyticsSnapshot) -> String {
     let mut rows = Vec::new();
     rows.push(csv_row(&[
@@ -3785,6 +3820,10 @@ mod tests {
         assert_eq!(snapshot.event_count, 1);
         assert_eq!(snapshot.total.total_tokens, 3_000);
         assert!((snapshot.total_cost_usd - 0.032275).abs() < 0.000001);
+        assert_eq!(snapshot.daily.len(), 1);
+        assert_eq!(snapshot.daily[0].date, "2026-06-10");
+        assert_eq!(snapshot.daily[0].total.total_tokens, 3_000);
+        assert!((snapshot.daily[0].cost_usd - 0.032275).abs() < 0.000001);
         assert_eq!(snapshot.weekly_budget_alert, "danger");
         assert_eq!(progress_events.last().expect("progress").percent, 100);
         assert_eq!(snapshot.projects[0].project_name, "project-alpha");

@@ -133,6 +133,7 @@ export type CodexCostAnalyticsSnapshot = {
   costSource: "local_estimate" | string;
   costSourceUpdatedAt: number | null;
   costSourceError: string | null;
+  daily: CodexDailyCostBucket[];
   weeklyBudgetUsd: number | null;
   weeklyBudgetPercent: number | null;
   weeklyBudgetAlert: CodexBudgetAlert;
@@ -140,6 +141,13 @@ export type CodexCostAnalyticsSnapshot = {
   sessions: CodexSessionCostBreakdown[];
   heatmap: CodexHourlyCostBucket[];
   topPrompts: CodexPromptCostBreakdown[];
+};
+
+export type CodexDailyCostBucket = {
+  date: string;
+  eventCount: number;
+  total: CodexTokenTotals;
+  costUsd: number;
 };
 
 export type CodexCostAnalyticsProgress = {
