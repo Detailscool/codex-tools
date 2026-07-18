@@ -312,6 +312,7 @@
   }
 
   .analyticsHeader,
+  .analyticsDateRange,
   .analyticsBudget,
   .analyticsGrid,
   .analyticsStats {
@@ -327,6 +328,20 @@
   .analyticsBudgetActions > button {
     flex: 1 1 0;
     min-width: 0;
+  }
+
+  .analyticsDateRange {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .analyticsDateRange > strong,
+  .analyticsDatePresets {
+    width: 100%;
+  }
+
+  .analyticsDateRange label {
+    flex: 1 1 150px;
   }
 
   .analyticsBlockSessions,
