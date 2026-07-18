@@ -16,6 +16,7 @@ import { formatFullDate } from "../utils/dateFormatting";
 import { MembershipExpiry } from "./accounts/MembershipExpiry";
 import { UsageFreshnessBadge } from "./accounts/UsageFreshnessBadge";
 import {
+  fiveHourUsageWindow,
   formatPlan,
   formatTokenCount,
   percent,
@@ -182,14 +183,20 @@ function usedPercent(window: UsageWindow | null): number | null {
 }
 
 function accountHasExhaustedWindow(account: AccountSummary): boolean {
-  return [account.usage?.fiveHour ?? null, account.usage?.oneWeek ?? null].some((window) => {
+  return [
+    fiveHourUsageWindow(account.usage?.fiveHour ?? null),
+    account.usage?.oneWeek ?? null,
+  ].some((window) => {
     const remaining = remainingPercent(window);
     return remaining !== null && remaining <= 0;
   });
 }
 
 function lowestRemaining(account: AccountSummary): number | null {
-  const values = [remainingPercent(account.usage?.fiveHour ?? null), remainingPercent(account.usage?.oneWeek ?? null)]
+  const values = [
+    remainingPercent(fiveHourUsageWindow(account.usage?.fiveHour ?? null)),
+    remainingPercent(account.usage?.oneWeek ?? null),
+  ]
     .filter((value): value is number => value !== null && !Number.isNaN(value));
   return values.length > 0 ? Math.min(...values) : null;
 }
@@ -637,6 +644,9 @@ export function AccountsGrid({
   const [openMenuPosition, setOpenMenuPosition] = useState<RowActionMenuPosition | null>(null);
   const [switchRecords, setSwitchRecords] = useState<SwitchRecord[]>([]);
   const [expandedResetCreditsByAccount, setExpandedResetCreditsByAccount] = useState<Record<string, boolean>>({});
+  const hasFiveHourUsage = accounts.some(
+    (account) => fiveHourUsageWindow(account.usage?.fiveHour ?? null) !== null,
+  );
 
   const positionOpenMenu = useCallback((menuHeight = ROW_ACTION_MENU_ESTIMATED_HEIGHT) => {
     const trigger = openMenuButtonRef.current;
@@ -799,6 +809,9 @@ export function AccountsGrid({
     filteredRows[0] ||
     rows[0] ||
     null;
+  const selectedFiveHour = fiveHourUsageWindow(
+    selectedRow?.account.usage?.fiveHour ?? null,
+  );
 
   const selectAccount = (accountId: string) => {
     setEditingAliasId(null);
@@ -917,7 +930,9 @@ export function AccountsGrid({
               <p>{accounts.length === 0 ? copy.accountsGrid.emptyDescription : text.noMatchesDescription}</p>
             </div>
           ) : (
-            <div className="accountListFrame">
+            <div
+              className={`accountListFrame${hasFiveHourUsage ? " hasFiveHourUsage" : ""}`}
+            >
               <TokenUsageStrip
                 tokenUsage={tokenUsage}
                 tokenUsageError={tokenUsageError}
@@ -929,7 +944,7 @@ export function AccountsGrid({
               />
               <div className="accountListHeader" aria-hidden="true">
                 <span>{copy.bottomDock.accounts}</span>
-                <span>{text.fiveHourUsage}</span>
+                {hasFiveHourUsage ? <span>{text.fiveHourUsage}</span> : null}
                 <span>{text.weekUsage}</span>
                 <span>{text.resetTime}</span>
                 <span>{text.proxyEnabled}</span>
@@ -949,6 +964,7 @@ export function AccountsGrid({
                 const isMenuOpen = openMenuAccountId === account.id;
                 const accountAddress = displayAccountAddress(account, text.emptyValue);
                 const issueReason = accountIssueReason(account, text.issueFallbackReason);
+                const fiveHour = fiveHourUsageWindow(account.usage?.fiveHour ?? null);
 
                 return (
                   <article
@@ -1028,13 +1044,15 @@ export function AccountsGrid({
                         </span>
                       </span>
                     </div>
-                    <UsageMeter
-                      className="accountUsageFive"
-                      label={text.fiveHourUsage}
-                      windowLabel="5h"
-                      window={account.usage?.fiveHour ?? null}
-                      text={text}
-                    />
+                    {hasFiveHourUsage ? (
+                      <UsageMeter
+                        className="accountUsageFive"
+                        label={text.fiveHourUsage}
+                        windowLabel="5h"
+                        window={fiveHour}
+                        text={text}
+                      />
+                    ) : null}
                     <UsageMeter
                       className="accountUsageWeek"
                       label={text.weekUsage}
@@ -1043,7 +1061,9 @@ export function AccountsGrid({
                       text={text}
                     />
                     <div className="resetCell">
-                      <span>{formatResetValue(account.usage?.fiveHour?.resetAt, locale, text.emptyValue)}</span>
+                      {hasFiveHourUsage ? (
+                        <span>{formatResetValue(fiveHour?.resetAt, locale, text.emptyValue)}</span>
+                      ) : null}
                       <strong>{formatResetValue(account.usage?.oneWeek?.resetAt, locale, text.emptyValue)}</strong>
                     </div>
                     <label className="rowToggle" onClick={(event) => event.stopPropagation()}>
@@ -1245,12 +1265,14 @@ export function AccountsGrid({
                   copy={copy.accountsGrid}
                 />
               </div>
-              <UsageMeter
-                label={text.fiveHourUsage}
-                windowLabel="5h"
-                window={selectedRow.account.usage?.fiveHour ?? null}
-                text={text}
-              />
+              {selectedFiveHour ? (
+                <UsageMeter
+                  label={text.fiveHourUsage}
+                  windowLabel="5h"
+                  window={selectedFiveHour}
+                  text={text}
+                />
+              ) : null}
               <UsageMeter
                 label={text.weekUsage}
                 windowLabel="1w"
