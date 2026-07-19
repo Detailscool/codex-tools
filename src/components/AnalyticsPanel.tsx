@@ -66,8 +66,8 @@ function monthFromIsoDate(date: string) {
 function weekdayHourFromTimestamp(timestamp: number) {
   const date = new Date(timestamp * 1000);
   return {
-    weekday: date.getUTCDay(),
-    hour: date.getUTCHours(),
+    weekday: date.getDay(),
+    hour: date.getHours(),
   };
 }
 
@@ -301,17 +301,17 @@ function DailyHeatmap({
 }
 
 function HourlyHeatmap({
-  prompts,
+  buckets,
   locale,
 }: {
-  prompts: CodexCostAnalyticsSnapshot["dailyPrompts"];
+  buckets: CodexCostAnalyticsSnapshot["hourlyTimeline"];
   locale: string;
 }) {
   const byKey = new Map<string, number>();
-  for (const prompt of prompts) {
-    const { weekday, hour } = weekdayHourFromTimestamp(prompt.timestamp);
+  for (const bucket of buckets) {
+    const { weekday, hour } = weekdayHourFromTimestamp(bucket.timestamp);
     const key = `${weekday}:${hour}`;
-    byKey.set(key, (byKey.get(key) ?? 0) + prompt.total.totalTokens);
+    byKey.set(key, (byKey.get(key) ?? 0) + bucket.tokens);
   }
   const maxTokens = Math.max(...Array.from(byKey.values()), 1);
   const hourLabels = Array.from({ length: 24 }, (_, hour) => hour);
@@ -353,16 +353,16 @@ function HourlyHeatmap({
 }
 
 function TodayHourlyHeatmap({
-  prompts,
+  buckets,
   locale,
 }: {
-  prompts: CodexCostAnalyticsSnapshot["dailyPrompts"];
+  buckets: CodexCostAnalyticsSnapshot["hourlyTimeline"];
   locale: string;
 }) {
   const byHour = new Map<number, number>();
-  for (const prompt of prompts) {
-    const { hour } = weekdayHourFromTimestamp(prompt.timestamp);
-    byHour.set(hour, (byHour.get(hour) ?? 0) + prompt.total.totalTokens);
+  for (const bucket of buckets) {
+    const { hour } = weekdayHourFromTimestamp(bucket.timestamp);
+    byHour.set(hour, (byHour.get(hour) ?? 0) + bucket.tokens);
   }
   const maxTokens = Math.max(...Array.from(byHour.values()), 1);
   const hourLabels = Array.from({ length: 24 }, (_, hour) => hour);
@@ -586,6 +586,10 @@ export function AnalyticsPanel({
     () => analytics?.dailyPrompts ?? [],
     [analytics?.dailyPrompts],
   );
+  const hourlyTimeline = useMemo(
+    () => analytics?.hourlyTimeline ?? [],
+    [analytics?.hourlyTimeline],
+  );
   const earliestDate = daily[0]?.date ?? "";
   const latestDate = daily[daily.length - 1]?.date ?? "";
   const todayDate = useMemo(() => localIsoDate(new Date()), []);
@@ -773,6 +777,17 @@ export function AnalyticsPanel({
           (!selectedDateTo || prompt.date <= selectedDateTo),
       ),
     [dailyPrompts, selectedDateFrom, selectedDateTo],
+  );
+  const selectedHourlyTimeline = useMemo(
+    () =>
+      hourlyTimeline.filter((bucket) => {
+        const date = localIsoDate(new Date(bucket.timestamp * 1000));
+        return (
+          (!selectedDateFrom || date >= selectedDateFrom) &&
+          (!selectedDateTo || date <= selectedDateTo)
+        );
+      }),
+    [hourlyTimeline, selectedDateFrom, selectedDateTo],
   );
   const selectedTopPrompts = useMemo(() => {
     type RangePrompt = CodexPromptCostBreakdown & {
@@ -1202,7 +1217,7 @@ export function AnalyticsPanel({
               </div>
               {activeDatePreset === "today" ? (
                 <TodayHourlyHeatmap
-                  prompts={selectedDailyPrompts}
+                  buckets={selectedHourlyTimeline}
                   locale={locale}
                 />
               ) : activeDatePreset === "30d" || activeDatePreset === "all" ? (
@@ -1213,7 +1228,10 @@ export function AnalyticsPanel({
                   locale={locale}
                 />
               ) : (
-                <HourlyHeatmap prompts={selectedDailyPrompts} locale={locale} />
+                <HourlyHeatmap
+                  buckets={selectedHourlyTimeline}
+                  locale={locale}
+                />
               )}
             </section>
 
