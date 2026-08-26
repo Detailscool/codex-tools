@@ -534,6 +534,31 @@ mod tests {
     }
 
     #[test]
+    fn usage_payload_keeps_zero_five_hour_usage_independent_from_weekly() {
+        let payload: UsageApiResponse = serde_json::from_value(json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 0.0,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1784968885
+                },
+                "secondary_window": {
+                    "used_percent": 18.0,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1785568885
+                }
+            }
+        }))
+        .expect("deserialize usage payload");
+
+        let snapshot = map_usage_payload(payload, None);
+
+        assert_eq!(snapshot.five_hour.as_ref().map(|window| window.used_percent), Some(0.0));
+        assert_eq!(snapshot.one_week.as_ref().map(|window| window.used_percent), Some(18.0));
+    }
+
+    #[test]
     fn reset_credits_payload_accepts_common_timestamp_shapes() {
         let snapshot = map_reset_credits_payload(json!({
             "available_count": 2,
