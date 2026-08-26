@@ -16,7 +16,6 @@ use crate::auth::extract_auth;
 use crate::auth::has_newer_auth_refresh_snapshot;
 use crate::auth::read_current_codex_auth_optional;
 use crate::auth::write_active_codex_auth;
-use crate::models::align_zero_five_hour_usage_with_weekly;
 use crate::models::dedupe_account_variants;
 use crate::models::AccountSourceKind;
 use crate::models::AccountsStore;
@@ -371,14 +370,6 @@ fn normalize_loaded_store(path: &Path, mut store: AccountsStore) -> AccountsStor
     }
 
     for account in &mut store.accounts {
-        if account
-            .usage
-            .as_mut()
-            .is_some_and(align_zero_five_hour_usage_with_weekly)
-        {
-            changed = true;
-        }
-
         if account
             .principal_id
             .as_deref()

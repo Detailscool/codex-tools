@@ -2,7 +2,6 @@ use serde::Deserialize;
 use std::error::Error as StdError;
 
 use crate::app_paths;
-use crate::models::align_zero_five_hour_usage_with_weekly;
 use crate::models::CreditSnapshot;
 use crate::models::ResetCredit;
 use crate::models::ResetCreditsSnapshot;
@@ -317,7 +316,7 @@ fn map_usage_payload(
     )
     .map(to_usage_window);
 
-    let mut snapshot = UsageSnapshot {
+    UsageSnapshot {
         fetched_at: now_unix_seconds(),
         plan_type: payload.plan_type,
         five_hour,
@@ -328,9 +327,7 @@ fn map_usage_payload(
             balance: credit.balance,
         }),
         reset_credits,
-    };
-    align_zero_five_hour_usage_with_weekly(&mut snapshot);
-    snapshot
+    }
 }
 
 fn map_reset_credits_payload(payload: serde_json::Value) -> ResetCreditsSnapshot {
@@ -478,6 +475,31 @@ mod tests {
                 .map(|window| window.window_seconds),
             Some(604800)
         );
+    }
+
+    #[test]
+    fn usage_payload_keeps_zero_five_hour_usage_independent_from_weekly() {
+        let payload: UsageApiResponse = serde_json::from_value(json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 0.0,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1784968885
+                },
+                "secondary_window": {
+                    "used_percent": 18.0,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1785568885
+                }
+            }
+        }))
+        .expect("deserialize usage payload");
+
+        let snapshot = map_usage_payload(payload, None);
+
+        assert_eq!(snapshot.five_hour.as_ref().map(|window| window.used_percent), Some(0.0));
+        assert_eq!(snapshot.one_week.as_ref().map(|window| window.used_percent), Some(18.0));
     }
 
     #[test]
