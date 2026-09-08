@@ -785,6 +785,14 @@ impl Default for AppSettings {
     }
 }
 
+// Missing fields leave settings unchanged; explicit null clears the value.
+fn deserialize_proxy_url_patch<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppSettingsPatch {
@@ -803,6 +811,7 @@ pub(crate) struct AppSettingsPatch {
     pub(crate) smart_switch_include_api: Option<bool>,
     pub(crate) launch_codex_as_admin: Option<bool>,
     pub(crate) codex_launch_path: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_proxy_url_patch")]
     pub(crate) proxy_url: Option<Option<String>>,
     pub(crate) sync_opencode_openai_auth: Option<bool>,
     pub(crate) restart_opencode_desktop_on_switch: Option<bool>,
@@ -1607,6 +1616,22 @@ mod tests {
         let settings = super::AppSettings::default();
 
         assert_eq!(settings.proxy_url, None);
+    }
+
+    #[test]
+    fn app_settings_patch_distinguishes_proxy_clear_from_omission() {
+        for (payload, expected) in [
+            (json!({}), None),
+            (json!({ "proxyUrl": null }), Some(None)),
+            (
+                json!({ "proxyUrl": "http://127.0.0.1:7890" }),
+                Some(Some("http://127.0.0.1:7890".to_string())),
+            ),
+        ] {
+            let patch: AppSettingsPatch =
+                serde_json::from_value(payload).expect("deserialize settings patch");
+            assert_eq!(patch.proxy_url, expected);
+        }
     }
 
     #[test]

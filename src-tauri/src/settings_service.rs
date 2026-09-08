@@ -459,7 +459,15 @@ mod tests {
                 Ok("http://127.0.0.1:7890")
             );
 
-            apply_proxy_environment(None);
+            let patch: crate::models::AppSettingsPatch =
+                serde_json::from_value(serde_json::json!({ "proxyUrl": null }))
+                    .expect("deserialize proxy clear request");
+            let proxy_url = normalize_proxy_url_for_storage(
+                patch.proxy_url.expect("clear request must update proxy"),
+            )
+            .expect("normalize cleared proxy");
+            assert_eq!(proxy_url, None);
+            apply_proxy_environment(proxy_url.as_deref());
             assert!(std::env::var_os("HTTP_PROXY").is_none());
             assert!(std::env::var_os("HTTPS_PROXY").is_none());
         });
