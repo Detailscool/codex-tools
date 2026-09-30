@@ -1,8 +1,12 @@
 import type { AccountSummary } from "../types/app";
 
-// The list uses immutable import order; quota ranking is reserved for smart switch.
+// Keep the active account at the top; preserve import order for the rest.
 export function sortAccountsForDisplay(accounts: AccountSummary[]): AccountSummary[] {
-  return [...accounts].sort((left, right) =>
-    left.addedAt - right.addedAt || left.id.localeCompare(right.id),
-  );
+  return [...accounts].sort((left, right) => {
+    if (left.isCurrent !== right.isCurrent) {
+      return left.isCurrent ? -1 : 1;
+    }
+
+    return left.addedAt - right.addedAt || left.id.localeCompare(right.id);
+  });
 }

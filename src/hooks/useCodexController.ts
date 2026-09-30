@@ -347,6 +347,7 @@ export function useCodexController(
   const reloginPromptedAccountKeysRef = useRef<Set<string>>(new Set());
   const profileIntegrityPromptedRef = useRef(false);
   const switchInFlightRef = useRef(false);
+  const accountSnapshotSequenceRef = useRef(0);
 
   const sortedAccounts = useMemo(
     () => sortAccountsByRemaining(accounts),
@@ -381,7 +382,17 @@ export function useCodexController(
   );
 
   const applyAccounts = useCallback(
-    (items: AccountSummary[], options?: { notifyBlocked?: boolean }) => {
+    (
+      items: AccountSummary[],
+      options?: { notifyBlocked?: boolean },
+      requestSequence?: number,
+    ) => {
+      if (requestSequence === undefined) {
+        accountSnapshotSequenceRef.current += 1;
+      } else if (requestSequence !== accountSnapshotSequenceRef.current) {
+        return false;
+      }
+
       const localized = localizeAccounts(items);
       setAccounts(localized);
 
@@ -473,8 +484,9 @@ export function useCodexController(
   }, [remoteProxyStatusesRaw]);
 
   const loadAccounts = useCallback(async () => {
+    const requestSequence = ++accountSnapshotSequenceRef.current;
     const data = await invoke<AccountSummary[]>("list_accounts");
-    applyAccounts(data);
+    applyAccounts(data, undefined, requestSequence);
     return data;
   }, [applyAccounts]);
 
@@ -683,6 +695,7 @@ export function useCodexController(
     ) => {
       const requestId = usageRefreshSequenceRef.current + 1;
       usageRefreshSequenceRef.current = requestId;
+      const accountSnapshotSequence = ++accountSnapshotSequenceRef.current;
       usageRefreshCountRef.current += 1;
       setUsageRefreshInFlight(true);
       setUsageRefreshError(null);
@@ -695,7 +708,11 @@ export function useCodexController(
           forceAuthRefresh,
           source,
         });
-        const promptedRelogin = applyAccounts(data);
+        const promptedRelogin = applyAccounts(
+          data,
+          undefined,
+          accountSnapshotSequence,
+        );
         if (requestId === usageRefreshSequenceRef.current) {
           setUsageRefreshError(null);
         }
