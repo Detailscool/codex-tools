@@ -502,6 +502,8 @@ mod tests {
 
         assert_eq!(snapshot.five_hour.unwrap().used_percent, 12.0);
         assert_eq!(snapshot.one_week.unwrap().used_percent, 37.0);
+    }
+
     #[test]
     fn usage_payload_does_not_reuse_weekly_window_as_five_hour_window() {
         let payload: UsageApiResponse = serde_json::from_value(json!({
